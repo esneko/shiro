@@ -1,21 +1,20 @@
-﻿using System;
+using System;
 using System.Collections.Generic;
-using System.Linq;
 using System.Text;
-using System.Threading.Tasks;
+using System.Linq;
+using System.Security.Claims;
+using AutoMapper;
 using Swashbuckle.AspNetCore.Swagger;
 using Microsoft.AspNetCore.Authentication.JwtBearer;
 using Microsoft.AspNetCore.Builder;
 using Microsoft.AspNetCore.Hosting;
-using Microsoft.AspNetCore.HttpsPolicy;
 using Microsoft.AspNetCore.Mvc;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.Configuration;
 using Microsoft.Extensions.DependencyInjection;
-using Microsoft.Extensions.Logging;
-using Microsoft.Extensions.Options;
 using Microsoft.IdentityModel.Tokens;
 using Shiro.Models;
+using Shiro.Services;
 
 namespace Shiro
 {
@@ -28,13 +27,11 @@ namespace Shiro
 
         public IConfiguration Configuration { get; }
 
-        // This method gets called by the runtime. Use this method to add services to the container.
         public void ConfigureServices(IServiceCollection services)
         {
-            services.AddDbContext<ApplicationContext>(options => options.UseInMemoryDatabase("Shiro"));
+            services.AddTransient<IUserRepository, UserRepository>();
 
-            services
-                .AddAuthentication(JwtBearerDefaults.AuthenticationScheme)
+            services.AddAuthentication(JwtBearerDefaults.AuthenticationScheme)
                 .AddJwtBearer(options =>
                 {
                     options.TokenValidationParameters = new TokenValidationParameters
@@ -47,17 +44,57 @@ namespace Shiro
                         ValidAudience = Configuration["Jwt:Issuer"],
                         IssuerSigningKey = new SymmetricSecurityKey(Encoding.UTF8.GetBytes(Configuration["Jwt:Key"]))
                     };
+
+                    options.Events = new JwtBearerEvents
+                    {
+                        OnTokenValidated = async ctx =>
+                        {
+                            var _context = ctx.HttpContext.RequestServices.GetRequiredService<SystemContext>();
+
+                            ClaimsIdentity identity = ctx.Principal.Identity as ClaimsIdentity;
+                            Claim claim = identity.Claims.FirstOrDefault(x => x.Type == "userId");
+                            Guid userId = new Guid(claim.Value);
+
+                            if (userId != null)
+                            {
+                                var user = await _context.User.FirstOrDefaultAsync(u => u.Id == userId && u.IsAdministrator);
+                                if (user != null)
+                                {
+                                    identity.AddClaim(new Claim(ClaimTypes.Role, "administrator"));
+                                }
+                            }
+                        }
+                    };
                 });
 
-                services.AddSwaggerGen(c =>
-                {
-                    c.SwaggerDoc("v1", new Info { Title = "WEB API", Version = "v1" });
-                });
+            services.AddDbContext<SystemContext>(options => options.UseInMemoryDatabase("System"));
+            services.AddDbContext<ApplicationContext>(options => options.UseInMemoryDatabase("Application"));
+
+            // services.AddDbContext<SystemContext>(options =>
+            //     options
+            //         .UseSqlServer(Configuration.GetConnectionString("DefaultConnection"))
+            //         .UseQueryTrackingBehavior(QueryTrackingBehavior.NoTracking));
+
+            // services.AddDbContext<ApplicationContext>(options =>
+            //     options
+            //         .UseSqlServer(Configuration.GetConnectionString("ApplicationConnection"))
+            //         .UseQueryTrackingBehavior(QueryTrackingBehavior.NoTracking));
+
+            services.AddSwaggerGen(c =>
+            {
+                c.SwaggerDoc("v1", new Info { Title = "WEB API", Version = "v1" });
+            });
+
+            services.AddAutoMapper();
 
             services.AddMvc().SetCompatibilityVersion(CompatibilityVersion.Version_2_1);
+
+            services.AddSpaStaticFiles(configuration =>
+            {
+                configuration.RootPath = "ClientApp/packages/shiro-app/build";
+            });
         }
 
-        // This method gets called by the runtime. Use this method to configure the HTTP request pipeline.
         public void Configure(IApplicationBuilder app, IHostingEnvironment env)
         {
             if (env.IsDevelopment())
@@ -66,8 +103,13 @@ namespace Shiro
             }
             else
             {
+                app.UseExceptionHandler("/Error");
                 app.UseHsts();
             }
+
+            app.UseHttpsRedirection();
+            app.UseStaticFiles();
+            app.UseSpaStaticFiles();
 
             app.UseSwagger();
             app.UseSwaggerUI(c =>
@@ -75,9 +117,24 @@ namespace Shiro
                 c.SwaggerEndpoint("/swagger/v1/swagger.json", "WEB API V1");
             });
 
-            app.UseHttpsRedirection();
             app.UseAuthentication();
-            app.UseMvc();
+
+            app.UseMvc(routes =>
+            {
+                routes.MapRoute(
+                    name: "default",
+                    template: "{controller}/{action=Index}/{id?}");
+            });
+
+            app.UseSpa(spa =>
+            {
+                spa.Options.SourcePath = "ClientApp";
+
+                if (env.IsDevelopment())
+                {
+                    spa.UseProxyToSpaDevelopmentServer("http://localhost:3000");
+                }
+            });
         }
     }
 }
